@@ -49,6 +49,381 @@
           this.activeMirror = null;
           this.activeController = null;
           this.lastControllerX = 0;
+          this.lastControllerYaw = 0;
+          this.raycaster = new THREE.Raycaster();
+          this.targetHit = false;
+        }
+
+        init() {
+          // 1. Licht hinzufügen
+          this.add(new THREE.HemisphereLight(0xffffff, 0x444444, 2));
+          const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+          dirLight.position.set(2, 5, 2);
+          this.add(dirLight);
+
+          // 2. Szenerie-Objekte aufbauen
+          this.buildEnvironment();
+
+          // 3. UI-Panel für Instruktionen
+          this.buildUI();
+        }
+
+        buildEnvironment() {
+          // Emitter (Laserquelle)
+          const emitterGeo = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+          const emitterMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
+          this.emitter = new THREE.Mesh(emitterGeo, emitterMat);
+          this.emitter.position.set(-1.0, 1.2, -1.5);
+          
+          // Kleine Linse am Emitter
+          const lensGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.1);
+          const lensMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+          const lens = new THREE.Mesh(lensGeo, lensMat);
+          lens.rotation.z = -Math.PI / 2;
+          lens.position.set(0.15, 0, 0);
+          this.emitter.add(lens);
+          this.add(this.emitter);
+
+          // Ständer für Emitter
+          this.addStand(this.emitter.position);
+
+          // Spiegel 1
+          const mirror1 = this.createMirror(0.0, 1.2, -1.5);
+          this.mirrors.push(mirror1);
+          
+          // Spiegel 2
+          const mirror2 = this.createMirror(0.0, 1.2, -2.5);
+          this.mirrors.push(mirror2);
+
+          // Ziel (Target)
+          const targetGeo = new THREE.SphereGeometry(0.15, 32, 32);
+          this.targetMat = new THREE.MeshStandardMaterial({ 
+            color: 0x114411, 
+            emissive: 0x000000,
+            roughness: 0.2,
+            metalness: 0.8
+          });
+          this.target = new THREE.Mesh(targetGeo, this.targetMat);
+          this.target.position.set(1.0, 1.2, -2.5);
+          this.add(this.target);
+          this.addStand(this.target.position);
+        }
+
+        addStand(pos) {
+          const standGeo = new THREE.CylinderGeometry(0.02, 0.05, pos.y);
+          const standMat = new THREE.MeshPhongMaterial({ color: 0x555555 });
+          const stand = new THREE.Mesh(standGeo, standMat);
+          stand.position.set(pos.x, pos.y / 2, pos.z);
+          this.add(stand);
+        }
+
+        createMirror(x, y, z) {
+          const group = new THREE.Group();
+          group.position.set(x, y, z);
+
+          // Rahmen
+          const frameGeo = new THREE.BoxGeometry(0.4, 0.4, 0.05);
+          const frameMat = new THREE.MeshPhongMaterial({ color: 0x224488 });
+          const frame = new THREE.Mesh(frameGeo, frameMat);
+          
+          // Spiegelfläche (Vorne)
+          const mirrorSurfaceGeo = new THREE.PlaneGeometry(0.35, 0.35);
+          const mirrorSurfaceMat = new THREE.MeshStandardMaterial({ 
+            color: 0xcccccc, 
+            metalness: 1.0, 
+            roughness: 0.1 
+          });
+          const surface = new THREE.Mesh(mirrorSurfaceGeo, mirrorSurfaceMat);
+          surface.position.z = 0.026; // Leicht vor dem Rahmen
+          frame.add(surface);
+
+          group.add(frame);
+          
+          // Troika Text für Winkelanzeige (Standardmäßig leer)
+          const angleText = new Text();
+          angleText.text = '';
+          angleText.fontSize = 0.06;
+          angleText.position.set(0, 0.3, 0);
+          angleText.color = 0xffff00;
+          angleText.anchorX = 'center';
+          angleText.anchorY = 'bottom';
+          group.add(angleText);
+          group.textLabel = angleText;
+
+          // Kollisionsfläche für Raycasting hinzufügen
+          group.collider = frame;
+
+          this.add(group);
+          this.addStand(group.position);
+          
+          return group;
+        }
+
+        buildUI() {
+          this.panel = new xb.SpatialPanel({
+            width: 1.6,
+            height: 1.0,
+            backgroundColor: '#1a1a1ae6',
+            useDefaultPosition: false
+          });
+          // Panel über der Szene platzieren
+          this.panel.position.set(0, 2.2, -2.0);
+          this.add(this.panel);
+
+          const grid = this.panel.addGrid();
+          
+          grid.addRow({weight: 0.25}).addText({
+            text: 'Laser-Spiegel-Parcours', 
+            fontSize: 0.12, 
+            fontColor: '#61dafb'
+          });
+          
+          grid.addRow({weight: 0.4}).addText({
+            text: 'Greife einen Spiegel (Pinch) und bewege die Hand\nnach links oder rechts, um ihn zu drehen.\nFühre den Laserstrahl ins Ziel!', 
+            fontSize: 0.06, 
+            fontColor: '#dddddd'
+          });
+
+          this.statusText = grid.addRow({weight: 0.35}).addText({
+            text: 'Status: Laser verfehlt das Ziel.', 
+            fontSize: 0.08, 
+            fontColor: '#ff5555'
+          });
+        }
+
+        onSelectStart(event) {
+          const controller = event.target;
+          
+          // Prüfen, ob ein Spiegel getroffen wurde
+          for (let mirror of this.mirrors) {
+            const intersection = xb.core.user.select(mirror.collider, controller);
+            if (intersection) {
+              this.activeMirror = mirror;
+              this.activeController = controller;
+              
+              // Für Cardboard speichern wir den Gaze-Winkel (Kopfdrehung um die Y-Achse)
+              const euler = new THREE.Euler().setFromQuaternion(controller.quaternion, 'YXZ');
+              this.lastControllerYaw = euler.y;
+              break;
+            }
+          }
+        }
+
+        onSelecting(event) {
+          // Spiegel drehen basierend auf der Kopfdrehung (Yaw) des Controllers/Headsets
+          if (this.activeMirror && event.target === this.activeController) {
+            const euler = new THREE.Euler().setFromQuaternion(event.target.quaternion, 'YXZ');
+            const deltaYaw = euler.y - this.lastControllerYaw;
+            
+            // Spiegel rotieren (Faktor 3.0 für ein angenehmes Übersetzungsverhältnis)
+            this.activeMirror.rotation.y += deltaYaw * 3.0;
+            
+            this.lastControllerYaw = euler.y;
+          }
+        }
+
+        onSelectEnd(event) {
+          if (event.target === this.activeController) {
+            this.activeMirror = null;
+            this.activeController = null;
+          }
+        }
+
+        drawBeam(points) {
+          // Genügend Zylinder-Meshes sicherstellen
+          while (this.beamCylinders.length < points.length - 1) {
+            const cyl = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.01, 0.01, 1, 8),
+              new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.8 })
+            );
+            // Zylinder rotieren, damit die lokale Z-Achse nach vorne zeigt (für lookAt)
+            cyl.geometry.rotateX(Math.PI / 2);
+            this.add(cyl);
+            this.beamCylinders.push(cyl);
+          }
+
+          // Alle ausblenden
+          this.beamCylinders.forEach(c => c.visible = false);
+
+          // Sichtbare Zylinder positionieren und skalieren
+          for (let i = 0; i < points.length - 1; i++) {
+            const start = points[i];
+            const end = points[i+1];
+            const dist = start.distanceTo(end);
+            
+            const cyl = this.beamCylinders[i];
+            cyl.position.copy(start).lerp(end, 0.5);
+            cyl.scale.set(1, 1, dist);
+            cyl.lookAt(end);
+            cyl.visible = true;
+          }
+        }
+
+        update() {
+          super.update();
+
+          // Laser Logik
+          let currentPos = this.emitter.position.clone();
+          let currentDir = new THREE.Vector3(1, 0, 0); // Startrichtung: +X
+          let points = [currentPos.clone()];
+          let hitTarget = false;
+
+          // Alte Texte zurücksetzen
+          this.mirrors.forEach(m => {
+            m.textLabel.text = "";
+            m.textLabel.sync();
+          });
+
+          // Maximal 5 Bounces berechnen
+          for (let bounce = 0; bounce < 5; bounce++) {
+            this.raycaster.set(currentPos, currentDir);
+            
+            // Alle potenziellen Kollisionsobjekte sammeln
+            const colliders = this.mirrors.map(m => m.collider).concat([this.target]);
+            const intersects = this.raycaster.intersectObjects(colliders, false);
+
+            if (intersects.length > 0) {
+              const hit = intersects[0];
+              points.push(hit.point.clone());
+
+              if (hit.object === this.target) {
+                hitTarget = true;
+                break;
+              } else {
+                // Ein Spiegel wurde getroffen
+                const mirrorGroup = hit.object.parent;
+                
+                // Normale der getroffenen Fläche im World-Space berechnen
+                const normal = hit.face.normal.clone();
+                const normalMatrix = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+                const worldNormal = normal.applyMatrix3(normalMatrix).normalize();
+
+                // Einfallswinkel berechnen (Winkel zwischen invertierter Laser-Richtung und Normale)
+                const incoming = currentDir.clone().negate();
+                const angleRad = incoming.angleTo(worldNormal);
+                const angleDeg = Math.round((angleRad * 180) / Math.PI);
+
+                // Prüfen, ob die VORDERSEITE (Z > 0 im lokalen Raum) getroffen wurde
+                if (angleDeg > 90) {
+                  // Laser trifft Rückseite -> wird absorbiert
+                  break;
+                }
+
+                // Reflexionsgesetz: Einfallswinkel = Ausfallswinkel
+                mirrorGroup.textLabel.text = `Einfallswinkel: ${angleDeg}°\nAusfallswinkel: ${angleDeg}°`;
+                mirrorGroup.textLabel.sync();
+
+                // Neue Laser-Richtung berechnen
+                currentDir.reflect(worldNormal).normalize();
+                currentPos = hit.point.clone();
+                
+                // Minimalen Offset hinzufügen, um Selbstkollision zu vermeiden
+                currentPos.add(currentDir.clone().multiplyScalar(0.001));
+              }
+            } else {
+              // Nichts getroffen -> Strahl geht ins Leere
+              points.push(currentPos.clone().add(currentDir.clone().multiplyScalar(5)));
+              break;
+            }
+          }
+
+          // Strahl visualisieren
+          this.drawBeam(points);
+
+          // Status & Ziel-Farbe aktualisieren
+          if (hitTarget && !this.targetHit) {
+            this.targetHit = true;
+            this.targetMat.emissive.setHex(0x00ff00);
+            this.statusText.setText('Status: ZIEL GETROFFEN! Perfekt!');
+            this.statusText.fontColor = '#00ff00';
+          } else if (!hitTarget && this.targetHit) {
+            this.targetHit = false;
+            this.targetMat.emissive.setHex(0x000000);
+            this.statusText.setText('Status: Laser verfehlt das Ziel.');
+            this.statusText.fontColor = '#ff5555';
+          }
+        }
+      }
+
+      document.addEventListener('DOMContentLoaded', function () {
+        const options = new xb.Options();
+        options.enableUI();
+        options.enableHands();
+        
+        // Fadenkreuz (Gaze-Cursor) für Cardboard aktivieren, um das Zielen zu ermöglichen
+        options.enableReticles();
+        
+        options.setAppTitle('Laser Parcours');
+        
+        // Cardboard/VR Unterstützung durch Aktivierung des Stereo-Modus
+        options.simulator.stereo.enabled = true;
+        
+        // Füge das Erlebnis zur Engine hinzu und initialisiere
+        xb.add(new LaserParcours());
+        xb.init(options);
+      });
+    </script>
+  </body>
+</html>
+```
+
+### Was dieses Update bewirkt:
+1.  **Stereo-Rendering:** Die Zeile `options.simulator.stereo.enabled = true;` sorgt dafür, dass das `xrblocks`-Framework das Bild für VR-Headsets korrekt splittet.
+2.  **Cardboard-Optimierung:** Da Cardboard-Geräte auf die Sensoren deines Handys zugreifen (Gyroskop), übernimmt `xb.init(options)` die automatische Einbindung der WebXR-Schnittstelle. Wenn du das Erlebnis auf einem Handy öffnest und "VR" auswählst, wird nun der Stereo-Modus für dein Headset gestartet.
+
+**Hinweis:** Denke daran, dass Cardboard-Erlebnisse am besten funktionieren, wenn das Handy sicher im Headset sitzt. Die Interaktion erfolgt dann über die Kopfbewegung oder einen externen Bluetooth-Controller, während das visuelle Feedback (die Strahlenberechnung) für beide Augen gleichzeitig berechnet wird.
+
+Die XR App ist bestens für Android XR-Geräte geeignet. Auf dem Desktop kannst du das VR-Layout in der Vorschau im "Stereo"-Simulator testen.<!doctype html>
+<html lang="de">
+  <head>
+    <title>Laser-Spiegel-Parcours | XR Blocks</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+    <script>
+      window.litDisableBundleWarning = true;
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+          "troika-three-text": "https://cdn.jsdelivr.net/gh/protectwise/troika@028b81cf308f0f22e5aa8e78196be56ec1997af5/packages/troika-three-text/src/index.js",
+          "troika-three-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-three-utils/src/index.js",
+          "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
+          "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
+          "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
+          "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
+          "lit/": "https://esm.run/lit@3/",
+          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.14.1/build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.14.1/build/addons/"
+        }
+      }
+    </script>
+  </head>
+
+  <body>
+    <script type="module">
+      import 'xrblocks/addons/simulator/SimulatorAddons.js';
+      
+      import * as THREE from 'three';
+      import * as xb from 'xrblocks';
+      import { Text } from 'troika-three-text';
+
+      /**
+       * Laser-Spiegel-Parcours
+       * Ein edukatives XR Erlebnis zur Vermittlung von Reflexionsgesetzen.
+       */
+      class LaserParcours extends xb.Script {
+        constructor() {
+          super();
+          this.mirrors = [];
+          this.beamCylinders = [];
+          this.activeMirror = null;
+          this.activeController = null;
+          this.lastControllerX = 0;
           this.raycaster = new THREE.Raycaster();
           this.targetHit = false;
         }
