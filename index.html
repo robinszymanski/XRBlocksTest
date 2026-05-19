@@ -66,6 +66,15 @@
         }
 
         buildEnvironment() {
+          const floorGeo = new THREE.PlaneGeometry(10, 10);
+          const floorMat = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.9 });
+          const floor = new THREE.Mesh(floorGeo, floorMat);
+          floor.rotation.x = -Math.PI / 2;
+          this.add(floor);
+
+          const gridHelper = new THREE.GridHelper(10, 20, 0x444444, 0x222222);
+          this.add(gridHelper);
+
           const emitterGeo = new THREE.BoxGeometry(0.2, 0.2, 0.2);
           const emitterMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
           this.emitter = new THREE.Mesh(emitterGeo, emitterMat);
@@ -312,13 +321,17 @@
         options.enableUI();
         options.enableHands();
         
+        // Fortbewegung (Teleportation) aktivieren, damit man sich im Raum bewegen kann
+        options.enableLocomotion();
+        
         // Fadenkreuz (Gaze-Cursor) für Cardboard aktivieren
         options.enableReticles();
         
         options.setAppTitle('Laser Parcours');
         
-        // VR Cardboard Unterstützung
-        options.simulator.stereo.enabled = true;
+        // WICHTIG: Die Simulator-Stereo-Option muss für echtes Mobile VR deaktiviert sein!
+        // Sonst friert das Bild auf dem Handy ein und der "VR Starten" Button verschwindet.
+        options.simulator.stereo.enabled = false;
         
         xb.add(new LaserParcours());
         xb.init(options);
